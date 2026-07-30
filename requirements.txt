@@ -1,0 +1,10 @@
+streamlit
+pandas
+numpy
+plotly
+pillow
+pybaseball
+kaleido
+pyarrow
+scikit-learn
+scipy
