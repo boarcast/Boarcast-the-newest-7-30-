@@ -1,0 +1,69 @@
+name: MLB Statcast 每日自動增量更新
+
+on:
+  schedule:
+    # cron 只吃 UTC。美東時間 05:00 對應：
+    #   - 夏令時間 EDT（UTC-4，約 3 月中 ~ 11 月初）→ UTC 09:00
+    #   - 標準時間 EST（UTC-5，約 11 月初 ~ 3 月中）→ UTC 10:00
+    # 兩條 cron 都排上去，腳本本身用 America/New_York 時區計算「昨天」，
+    # 所以就算某天兩條 cron 都觸發（或都沒觸發在正確時刻），也不會抓錯日期，
+    # 頂多多跑一次、被去重複邏輯吃掉而已。
+    #
+    # [2026 Rev] 月份欄位限制在 3~11 月（涵蓋 2 月底東京/首爾海外開幕賽的前置
+    # 緩衝與 11 月初的世界大賽尾聲），避免 12 月～隔年 2 月休賽季期間每天固定
+    # 觸發兩次、卻注定抓不到資料的無謂 Actions 執行額度消耗。daily_update.py
+    # 內部也有一層休賽季保護（[Rev 2]）作為第二道防線，即使 cron 排程不慎在
+    # 休賽季觸發也會被腳本靜默略過，不會出錯。
+    - cron: "0 9 * 3-11 *"
+    - cron: "0 10 * 3-11 *"
+  workflow_dispatch: {}  # 保留手動觸發開關（休賽季仍可手動觸發補抓或除錯，不受月份限制）
+
+permissions:
+  contents: write
+
+concurrency:
+  group: mlb-daily-update
+  cancel-in-progress: false
+
+jobs:
+  update-data:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run incremental Statcast update (Module 1)
+        run: python scripts/daily_update.py
+
+      - name: Run anomaly detector (Module 2)
+        run: python scripts/anomaly_detector.py
+
+      - name: Commit and push updated data files
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          # [2026 Rev] daily_update.py 的資料路徑已改為動態年份檔名
+          # （data/statcast_{year}.parquet），並另外維護一份
+          # data/statcast_current_season.parquet 相容捷徑（symlink 或複製檔），
+          # 這裡改用萬用字元把「所有年度的 parquet」與相容捷徑都納入 git add，
+          # 避免新賽季開打、產生新檔名時被 commit 步驟遺漏。
+          git add data/statcast_*.parquet data/anomaly_today.json
+          if git diff --cached --quiet; then
+            echo "ℹ️ 沒有資料變動，略過 commit。"
+          else
+            SEASON_YEAR="$(TZ=America/New_York date +'%Y')"
+            git commit -m "chore: update ${SEASON_YEAR} Statcast data ($(date -u +'%Y-%m-%d'))"
+            git push
+          fi
